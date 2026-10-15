@@ -70,6 +70,11 @@ try {
         Copy-Item -LiteralPath (Join-Path $OutputDir "config-web.html") -Destination $productStage -Force
         Copy-Item -LiteralPath (Join-Path $OutputDir "使用说明.md") -Destination $productStage -Force
 
+        $guardianDir = Join-Path $Root "guardian"
+        if (Test-Path -LiteralPath $guardianDir) {
+            Copy-Item -LiteralPath $guardianDir -Destination (Join-Path $productStage "guardian") -Recurse -Force
+        }
+
         $zipPath = if ($product -eq "ide") { $ideZip } else { $cliZip }
         Compress-Archive -Path (Join-Path $productStage "*") -DestinationPath $zipPath -Force
         Write-Host "[打包] 已生成 $product 产物: $zipPath"

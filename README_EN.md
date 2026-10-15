@@ -26,6 +26,7 @@
 
 - [📖 Introduction](#-introduction)
 - [🚨 Read This First: Check IP Before DLL](#-read-this-first-check-ip-before-dll)
+- [🛡️ Auto-Guardian: Prevent DLL Loss on Updates](#️-auto-guardian-prevent-dll-loss-on-updates)
 - [⚡ Antigravity Quick Start](#-antigravity-quick-start)
 - [🔧 Troubleshooting Guide](#-troubleshooting-guide)
 - [✨ Features](#-features)
@@ -152,6 +153,42 @@ Have you ever encountered these situations?
 | Global proxy | Precise per-process proxy |
 | Needs admin privileges | Regular user is fine |
 | Complex configuration | Just drop in the DLL |
+
+---
+
+## 🛡️ Auto-Guardian: Prevent DLL Loss on Updates
+
+> **🔥 Highlight: Completely solves the issue where Antigravity auto-updates wipe `version.dll` and `config.json` from the installation directory!**
+
+### The Problem
+Antigravity utilizes the Electron-Updater framework. Whenever a new version is released, the installer completely cleans and rebuilds the target installation directory, wiping out custom injected files such as `version.dll` and `config.json`. Previously, users had to manually re-copy these files every single time.
+
+### The Solution: Multi-Layered Auto-Healing Guardian
+1. **Persistent Vault**: Maintains protected master copies of `version.dll` and `config.json` in `%APPDATA%\AntigravityProxy\vault` that the updater cannot touch.
+2. **Kernel-Level Watcher (0% CPU)**: Continuously monitors the Antigravity folder via Windows `ReadDirectoryChangesW`. If an update occurs or files are removed, they are restored within milliseconds.
+3. **Shortcut Auto-Healing Dual Insurance**: Pre-checks and repairs proxy files in < 5ms whenever Antigravity is launched via the desktop shortcut.
+4. **Bidirectional Config Syncing**: Changes made to `config.json` locally or via `config-web.html` are automatically synced to the Vault.
+
+### 🚀 1-Click Installation (Recommended)
+
+Open PowerShell and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-guardian.ps1
+```
+
+#### Management Commands
+
+```powershell
+# Check status and proxy connectivity
+powershell -ExecutionPolicy Bypass -File .\guardian\status.ps1
+
+# Uninstall the guardian and restore original shortcuts
+powershell -ExecutionPolicy Bypass -File .\guardian\uninstall.ps1
+
+# Sync configuration between install folder and Vault
+powershell -ExecutionPolicy Bypass -File .\guardian\sync.ps1
+```
 
 ---
 

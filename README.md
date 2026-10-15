@@ -27,6 +27,7 @@
 
 - [📖 项目介绍 / Introduction](#-项目介绍--introduction)
 - [🚨 先看这个：对话报错先排 IP / Read This First](#-先看这个对话报错先排-ip--read-this-first)
+- [🛡️ 告别手动复制：Antigravity 更新自动自愈守护 / Auto-Guardian](#️-告别手动复制antigravity-更新自动自愈守护--auto-guardian)
 - [⚡ Antigravity 快速开始 / Quick Start](#-antigravity-快速开始--quick-start)
 - [🔧 故障排查自查手册 / Troubleshooting Guide](#-故障排查自查手册--troubleshooting-guide)
 - [✨ 功能特性 / Features](#-功能特性--features)
@@ -155,6 +156,50 @@
 2. 运行 `微软常用运行库合集-2025.exe`
 3. 按照安装向导完成安装
 4. 重新启动目标程序
+
+---
+
+## 🛡️ 告别手动复制：Antigravity 更新自动自愈守护 / Auto-Guardian
+
+> **🔥 核心特性：彻底解决 Antigravity 每次自动更新后根目录 `version.dll` 与 `config.json` 被安装程序清空导致的代理失效问题！**
+
+### 痛点背景
+Antigravity 使用 Electron-Updater 机制。每当官方发布新版本，更新安装器（NSIS）在更新时会完全重置安装目录，导致放在根目录的 `version.dll` 和 `config.json` 被直接删除。用户每次更新后都必须手动重新复制一遍文件，极其麻烦。
+
+### 解决方案：Guardian 全自动守护与双重自愈体系
+
+本仓库内置了专门针对 Windows 的 **Guardian 自动化自愈守护系统**：
+1. **持久化安全库 (Vault)**：将 `version.dll`、`config.json` 备份在独立的系统级目录 (`%APPDATA%\AntigravityProxy\vault`)，更新程序绝对无法清理。
+2. **内核级文件系统监听 (0% CPU 占用)**：基于 Windows 底层 `ReadDirectoryChangesW` 机制，常驻后台静默运行。一旦检测到 Antigravity 更新或文件被删除，毫秒级自动从 Vault 补全文件！
+3. **快捷方式自愈双保险**：点击桌面快捷方式启动 Antigravity 前，会在 5ms 内预检代理文件完整性并自动修复，双重保障，确保 100% 走代理。
+4. **双向配置同步**：用户通过 Web 页面或文本编辑修改了 `config.json`，Guardian 会自动同步回持久化安全库。
+
+### 🚀 一键开启自动守护 (推荐)
+
+在克隆仓库后，或者下载解压 Release 包后，只需打开 PowerShell 运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-guardian.ps1
+```
+
+> **效果**：
+> - 自动检测并部署 `version.dll` 和 `config.json` 到 Antigravity 目录
+> - 自动注册 Windows 开机自启计划任务（后台静默运行，**无任何黑框弹出**）
+> - 自动升级桌面快捷方式（双保险启动保护）
+> - **从此以后，无论 Antigravity 更新多少次，代理永远自动生效，无需任何手动操作！**
+
+#### 常用管理命令
+
+```powershell
+# 1. 查看守护进程状态、代理端口连通性及自愈日志
+powershell -ExecutionPolicy Bypass -File .\guardian\status.ps1
+
+# 2. 卸载守护任务并恢复原始快捷方式
+powershell -ExecutionPolicy Bypass -File .\guardian\uninstall.ps1
+
+# 3. 手动同步最新配置
+powershell -ExecutionPolicy Bypass -File .\guardian\sync.ps1
+```
 
 ---
 
