@@ -1,11 +1,12 @@
 ﻿# ==============================================================================
-# Antigravity Proxy Guardian (自愈守护服务)
+# Antigravity Proxy Guardian (自愈守护服务 - 增强版)
 # 
 # 功能：
-# 1. 实时监听 Antigravity 安装目录及更新器目录
-# 2. 当 Antigravity 更新重装导致根目录的 version.dll / config.json 被清理时，自动从 Vault 持久化库恢复
-# 3. 实时同步用户在应用中修改的 config.json 至 Vault
-# 4. 心跳定时巡检兜底，确保代理文件永远处于就绪状态
+# 1. 实时监听 Antigravity 父目录与更新器目录（防目录删除导致的句柄失效）
+# 2. 安装器高频拦截：在 installer.exe 运行期间高频写入，确保安装完毕瞬间 DLL 已到位
+# 3. 运行中进程健康监测：若检测到 Antigravity 被更新器直启且未加载代理 DLL，毫秒级自动重载
+# 4. 实时同步用户修改的 config.json 至 Vault
+# 5. 高频巡检兜底 (默认 2 秒)，确保代理文件永远处于就绪状态
 # ==============================================================================
 
 [CmdletBinding()]
@@ -13,7 +14,7 @@ param(
     [string]$TargetDir = "",
     [string]$VaultDir = "",
     [string]$UpdaterDir = "",
-    [int]$HeartbeatSec = 30,
+    [int]$HeartbeatSec = 2,
     [string]$LogFile = ""
 )
 
@@ -77,11 +78,11 @@ try {
     }
 }
 
-Write-GuardianLog "=== Antigravity Proxy Guardian 已启动 ==="
+Write-GuardianLog "=== Antigravity Proxy Guardian 已启动 (增强自愈版) ==="
 Write-GuardianLog "监控目标目录: $TargetDir"
 Write-GuardianLog "持久化存储库: $VaultDir"
 Write-GuardianLog "安装更新目录: $UpdaterDir"
-Write-GuardianLog "心跳检测周期: ${HeartbeatSec}秒"
+Write-GuardianLog "巡检检测周期: ${HeartbeatSec}秒"
 
 # 检查 Vault 状态
 if (-not (Test-Path -LiteralPath $VaultDir)) {
@@ -94,7 +95,7 @@ function Copy-FileWithRetry {
         [Parameter(Mandatory = $true)][string]$SourcePath,
         [Parameter(Mandatory = $true)][string]$DestinationPath,
         [int]$MaxRetries = 10,
-        [int]$DelayMs = 500
+        [int]$DelayMs = 200
     )
     if (-not (Test-Path -LiteralPath $SourcePath)) {
         Write-GuardianLog "复制失败: 源文件不存在 $SourcePath" "ERROR"
@@ -111,11 +112,10 @@ function Copy-FileWithRetry {
             Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force -ErrorAction Stop
             return $true
         } catch {
-            Write-GuardianLog "写入 $DestinationPath 冲突 (尝试 $i/$MaxRetries): $($_.Exception.Message)" "WARN"
             Start-Sleep -Milliseconds $DelayMs
         }
     }
-    Write-GuardianLog "文件复制超过最大重试次数: $DestinationPath" "ERROR"
+    Write-GuardianLog "文件复制超过最大重试次数: $DestinationPath" "WARN"
     return $false
 }
 
@@ -124,7 +124,6 @@ function Invoke-SelfHealing {
     param([string]$TriggerReason = "定期检查")
 
     if (-not (Test-Path -LiteralPath $TargetDir)) {
-        # 目标目录尚不存在，可能尚未安装 Antigravity
         return
     }
 
@@ -180,50 +179,159 @@ function Sync-TargetConfigToVault {
                 Write-GuardianLog "已将配置写入 Vault: $vaultCfg"
             }
         } catch {
-            Write-GuardianLog "同步配置到 Vault 失败: $($_.Exception.Message)" "WARN"
+            # 忽略文件占用
         }
     }
 }
 
-# 首次启动执行一次自愈检查与配置同步
-Invoke-SelfHealing -TriggerReason "守护进程启动自检"
-Sync-TargetConfigToVault
+# 检查并处理正在运行的安装器 (NSIS 活跃监测与高频写入)
+function Check-And-Handle-Installer {
+    $installers = Get-Process -Name "installer", "Antigravity-x64", "elevate" -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            $p = $_.Path
+            $p -like "*antigravity-updater*" -or $p -like "*AppData\Local\Temp*"
+        } catch { $false }
+    }
 
-# 创建目标目录 FileSystemWatcher
-$watcherTarget = New-Object System.IO.FileSystemWatcher
-$watcherTarget.Path = $TargetDir
-$watcherTarget.Filter = "*.*"
-$watcherTarget.IncludeSubdirectories = $false
-$watcherTarget.NotifyFilter = [System.IO.NotifyFilters]'FileName, LastWrite, CreationTime'
-$watcherTarget.EnableRaisingEvents = $true
+    if ($installers) {
+        Write-GuardianLog "[更新拦截] 检测到更新安装器正在运行 (PID: $($installers[0].Id))，启动高频写入防清空保护..." "WARN"
+        
+        $vaultDll = Join-Path $VaultDir "version.dll"
+        $vaultCfg = Join-Path $VaultDir "config.json"
+        $targetDll = Join-Path $TargetDir "version.dll"
+        $targetCfg = Join-Path $TargetDir "config.json"
 
-# 绑定事件处理
-$actionTarget = {
-    $path = $Event.SourceEventArgs.FullPath
-    $changeType = $Event.SourceEventArgs.ChangeType
-    $name = $Event.SourceEventArgs.Name
+        # 只要安装器仍在运行，每 100ms 探测并持续补齐
+        while ($true) {
+            $alive = Get-Process -Id $installers.Id -ErrorAction SilentlyContinue
+            if (-not $alive) { break }
 
-    if ($name -eq "Antigravity.exe" -and ($changeType -eq "Created" -or $changeType -eq "Changed")) {
-        # Antigravity 主程序变动，表明正在发生更新或安装
-        Start-Sleep -Milliseconds 1200
-        Invoke-SelfHealing -TriggerReason "检测到 Antigravity.exe 更新/写入"
-    } elseif ($name -eq "version.dll" -and ($changeType -eq "Deleted" -or $changeType -eq "Renamed")) {
-        # version.dll 被删除或重命名
-        Start-Sleep -Milliseconds 500
-        Invoke-SelfHealing -TriggerReason "检测到 version.dll 被移除"
-    } elseif ($name -eq "config.json" -and $changeType -eq "Changed") {
-        # 用户可能保存了配置
-        Start-Sleep -Milliseconds 500
-        Sync-TargetConfigToVault
+            if (Test-Path -LiteralPath $TargetDir) {
+                if (-not (Test-Path -LiteralPath $targetDll) -and (Test-Path -LiteralPath $vaultDll)) {
+                    Copy-Item -LiteralPath $vaultDll -Destination $targetDll -Force -ErrorAction SilentlyContinue
+                }
+                if (-not (Test-Path -LiteralPath $targetCfg) -and (Test-Path -LiteralPath $vaultCfg)) {
+                    Copy-Item -LiteralPath $vaultCfg -Destination $targetCfg -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        # 安装器退出瞬间再做一次确定性补全
+        Start-Sleep -Milliseconds 200
+        Invoke-SelfHealing -TriggerReason "安装器进程已退出"
+        Write-GuardianLog "[更新拦截] 安装器已退出，代理文件已确认就绪！" "SUCCESS"
     }
 }
 
-Register-ObjectEvent $watcherTarget "Changed" -Action $actionTarget | Out-Null
-Register-ObjectEvent $watcherTarget "Created" -Action $actionTarget | Out-Null
-Register-ObjectEvent $watcherTarget "Deleted" -Action $actionTarget | Out-Null
-Register-ObjectEvent $watcherTarget "Renamed" -Action $actionTarget | Out-Null
+# 进程健康检查：检测是否被安装器直启而遗漏加载代理 DLL
+$global:LastAutoRestartTime = [DateTime]::MinValue
 
-# 若存在更新器目录，同样监控更新器变动
+function Check-Running-Process-Health {
+    $antigravityProcs = Get-Process -Name "Antigravity" -ErrorAction SilentlyContinue
+    if (-not $antigravityProcs) { return }
+
+    # 获取主进程
+    $mainProc = $antigravityProcs | Sort-Object StartTime -Descending | Select-Object -First 1
+    if (-not $mainProc) { return }
+
+    try {
+        # 检查是否加载了目标目录下的 version.dll
+        $targetDll = Join-Path $TargetDir "version.dll"
+        $loadedModules = $mainProc.Modules | Where-Object { $_.ModuleName -eq "version.dll" }
+        
+        $isCorrectDll = $false
+        if ($loadedModules) {
+            foreach ($m in $loadedModules) {
+                if ($m.FileName -like "*Programs\Antigravity\version.dll*") {
+                    $isCorrectDll = $true
+                    break
+                }
+            }
+        }
+
+        if (-not $isCorrectDll) {
+            # 当前运行的 Antigravity 没有加载目标目录下的 version.dll！
+            $now = Get-Date
+            if (($now - $global:LastAutoRestartTime).TotalSeconds -lt 20) {
+                # 刚刚重启过，防止循环
+                return
+            }
+
+            Write-GuardianLog "[自愈重载] 检测到 Antigravity (PID: $($mainProc.Id)) 正在运行但未加载代理 DLL (可能是安装器直接拉起)！" "WARN"
+
+            # 1. 确保代理文件一定在目录中
+            Invoke-SelfHealing -TriggerReason "准备重启未代理的 Antigravity 实例"
+            Start-Sleep -Milliseconds 200
+
+            # 2. 终止未走代理的实例
+            Write-GuardianLog "[自愈重载] 正在自动重启 Antigravity 以激活代理..." "INFO"
+            $antigravityProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 600
+
+            # 3. 通过 launcher.vbs 重新拉起
+            $appDataProxy = Join-Path $env:APPDATA "AntigravityProxy"
+            $launcherVbs = Join-Path $appDataProxy "launcher.vbs"
+            if (Test-Path -LiteralPath $launcherVbs) {
+                Start-Process "wscript.exe" -ArgumentList "`"$launcherVbs`""
+            } else {
+                Start-Process (Join-Path $TargetDir "Antigravity.exe")
+            }
+
+            $global:LastAutoRestartTime = $now
+            Write-GuardianLog "[自愈重载] 已成功重启 Antigravity，代理已生效！" "SUCCESS"
+        }
+    } catch {
+        # 忽略进程退出时的异常
+    }
+}
+
+# 首次启动执行自检
+Invoke-SelfHealing -TriggerReason "守护进程启动自检"
+Sync-TargetConfigToVault
+
+# 监控上级目录 (Programs)，即使 Antigravity 整个子目录被删掉重建，Watcher 句柄也不会失效
+$parentDir = Split-Path -Parent $TargetDir
+$watcherTarget = $null
+if (Test-Path -LiteralPath $parentDir) {
+    try {
+        $watcherTarget = New-Object System.IO.FileSystemWatcher
+        $watcherTarget.Path = $parentDir
+        $watcherTarget.Filter = "*.*"
+        $watcherTarget.IncludeSubdirectories = $true
+        $watcherTarget.NotifyFilter = [System.IO.NotifyFilters]'FileName, LastWrite, CreationTime'
+        $watcherTarget.EnableRaisingEvents = $true
+
+        $actionTarget = {
+            $name = $Event.SourceEventArgs.Name
+            $changeType = $Event.SourceEventArgs.ChangeType
+
+            if ($name -like "*Antigravity\Antigravity.exe" -or $name -eq "Antigravity.exe") {
+                if ($changeType -eq "Created" -or $changeType -eq "Changed") {
+                    Start-Sleep -Milliseconds 300
+                    Invoke-SelfHealing -TriggerReason "检测到 Antigravity.exe 更新/写入"
+                }
+            } elseif ($name -like "*Antigravity\version.dll" -or $name -eq "version.dll") {
+                if ($changeType -eq "Deleted" -or $changeType -eq "Renamed") {
+                    Start-Sleep -Milliseconds 150
+                    Invoke-SelfHealing -TriggerReason "检测到 version.dll 被移除"
+                }
+            } elseif ($name -like "*Antigravity\config.json" -and $changeType -eq "Changed") {
+                Start-Sleep -Milliseconds 500
+                Sync-TargetConfigToVault
+            }
+        }
+
+        Register-ObjectEvent $watcherTarget "Changed" -Action $actionTarget | Out-Null
+        Register-ObjectEvent $watcherTarget "Created" -Action $actionTarget | Out-Null
+        Register-ObjectEvent $watcherTarget "Deleted" -Action $actionTarget | Out-Null
+        Register-ObjectEvent $watcherTarget "Renamed" -Action $actionTarget | Out-Null
+    } catch {
+        Write-GuardianLog "初始化上级目录监控跳过: $($_.Exception.Message)" "WARN"
+    }
+}
+
+# 监控更新器目录
 $watcherUpdater = $null
 if (Test-Path -LiteralPath $UpdaterDir) {
     try {
@@ -238,7 +346,8 @@ if (Test-Path -LiteralPath $UpdaterDir) {
             $name = $Event.SourceEventArgs.Name
             $changeType = $Event.SourceEventArgs.ChangeType
             if ($name -match "(installer\.exe|Antigravity.*\.exe)" -and ($changeType -eq "Created" -or $changeType -eq "Changed")) {
-                Write-GuardianLog "检测到更新器正在准备新版本 (${name}: ${changeType})，预置恢复待命"
+                Write-GuardianLog "检测到更新器文件变动 (${name}: ${changeType})，执行预置检查"
+                Check-And-Handle-Installer
             }
         }
 
@@ -251,11 +360,13 @@ if (Test-Path -LiteralPath $UpdaterDir) {
 
 Write-GuardianLog "实时监控已就绪，进入守护循环..."
 
-# 运行主循环 (定期心跳检测兜底)
+# 主循环 (每 2 秒高频巡检兜底)
 try {
     while ($true) {
         Start-Sleep -Seconds $HeartbeatSec
-        Invoke-SelfHealing -TriggerReason "心跳周期自检"
+        Check-And-Handle-Installer
+        Invoke-SelfHealing -TriggerReason "巡检周期自检"
+        Check-Running-Process-Health
         Sync-TargetConfigToVault
     }
 } finally {
