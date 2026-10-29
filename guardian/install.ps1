@@ -101,10 +101,15 @@ if ($srcWeb -and (Test-Path -LiteralPath $srcWeb)) {
     Copy-Item -LiteralPath $srcWeb -Destination (Join-Path $vaultDir "config-web.html") -Force
 }
 
-# 复制 guardian 运行脚本到 APPDATA 长期常驻目录
+# 复制 guardian 运行脚本到 APPDATA 长期常驻目录（标准化保证 CRLF 换行，防止 ANSI 解析异常）
 Copy-Item -LiteralPath (Join-Path $scriptRoot "guardian.ps1") -Destination (Join-Path $appDataProxy "guardian.ps1") -Force
-Copy-Item -LiteralPath (Join-Path $scriptRoot "guardian.vbs") -Destination (Join-Path $appDataProxy "guardian.vbs") -Force
-Copy-Item -LiteralPath (Join-Path $scriptRoot "launcher.vbs") -Destination (Join-Path $appDataProxy "launcher.vbs") -Force
+foreach ($vbsName in @("guardian.vbs", "launcher.vbs")) {
+    $srcVbs = Join-Path $scriptRoot $vbsName
+    $dstVbs = Join-Path $appDataProxy $vbsName
+    $vbsContent = [System.IO.File]::ReadAllText($srcVbs, [System.Text.Encoding]::UTF8)
+    $normalizedContent = $vbsContent -replace "`r?`n", "`r`n"
+    [System.IO.File]::WriteAllText($dstVbs, $normalizedContent, [System.Text.Encoding]::ASCII)
+}
 
 # 4. 同步写入目标目录
 Write-Host "[4/6] 部署到 Antigravity 安装目录..." -ForegroundColor Yellow
